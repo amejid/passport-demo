@@ -1,12 +1,26 @@
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const session = require('express-session');
+const bcrypt = require('bcryptjs');
 const passport = require('passport');
 const LocalStrategy = require('passport-local').Strategy;
 const mongoose = require('mongoose');
 const Schema = mongoose.Schema;
 
-const mongoDb = 'YOUR MONGO URL HERE';
+const MongoDBStore = require('connect-mongodb-session')(session);
+
+var store = new MongoDBStore({
+  uri: process.env.MONGO_URI,
+  collection: 'sessions',
+});
+
+// Catch errors
+store.on('error', function (error) {
+  console.log(error);
+});
+
+const mongoDb = process.env.MONGO_URI;
 mongoose.connect(mongoDb, { useUnifiedTopology: true, useNewUrlParser: true });
 const db = mongoose.connection;
 db.on('error', console.error.bind(console, 'mongo connection error'));
@@ -30,10 +44,12 @@ passport.use(
       if (!user) {
         return done(null, false, { message: 'Incorrect username' });
       }
-      if (user.password !== password) {
+      const result = await bcrypt.compare(password, user.password);
+      if (result) {
+        return done(null, user);
+      } else {
         return done(null, false, { message: 'Incorrect password' });
       }
-      return done(null, user);
     } catch (err) {
       return done(err);
     }
@@ -53,7 +69,14 @@ passport.deserializeUser(async function (id, done) {
   }
 });
 
-app.use(session({ secret: 'cats', resave: false, saveUninitialized: true }));
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: true,
+    store: store,
+  })
+);
 app.use(passport.initialize());
 app.use(passport.session());
 app.use(express.urlencoded({ extended: false }));
@@ -63,19 +86,27 @@ app.use(function (req, res, next) {
   next();
 });
 
-app.get('/sign-up', (req, res) => res.render('sign-up-form'));
+const authMiddleware = (req, res, next) => {
+  if (!req.user) {
+    if (!req.session.messages) {
+      req.session.messages = [];
+    }
+    req.session.messages.push("You can't access that page before logon.");
+    res.redirect('/');
+  } else {
+    next();
+  }
+};
 
-app.get('/', (req, res) => {
-  res.render('index', { user: req.user });
-});
+app.get('/sign-up', (req, res) => res.render('sign-up-form'));
 
 app.post('/sign-up', async (req, res, next) => {
   try {
-    const user = new User({
+    const hashedPassword = await bcrypt.hash(req.body.password, 10);
+    await User.create({
       username: req.body.username,
-      password: req.body.password,
+      password: hashedPassword,
     });
-    const result = await user.save();
     res.redirect('/');
   } catch (err) {
     return next(err);
@@ -87,16 +118,32 @@ app.post(
   passport.authenticate('local', {
     successRedirect: '/',
     failureRedirect: '/',
+    failureMessage: true,
   })
 );
 
-app.get('/log-out', (req, res, next) => {
-  req.logout(function (err) {
-    if (err) {
-      return next(err);
-    }
+app.get('/log-out', (req, res) => {
+  req.session.destroy(function (err) {
     res.redirect('/');
   });
+});
+
+app.get('/restricted', authMiddleware, (req, res) => {
+  if (!req.session.pageCount) {
+    req.session.pageCount = 1;
+  } else {
+    req.session.pageCount++;
+  }
+  res.render('restricted', { pageCount: req.session.pageCount });
+});
+
+app.get('/', (req, res) => {
+  let messages = [];
+  if (req.session.messages) {
+    messages = req.session.messages;
+    req.session.messages = [];
+  }
+  res.render('index', { messages });
 });
 
 app.listen(3000, () => console.log('app listening on port 3000!'));
